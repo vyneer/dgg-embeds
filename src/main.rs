@@ -55,7 +55,7 @@ fn main() -> Result<()> {
         NO_PARAMS,
     )?;
 
-    let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube)/(?:[A-z0-9_\-]{3,64}))\b").unwrap();
+    let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube|#youtube-live)/(?:[A-z0-9_\-]{3,64}))\b").unwrap();
 
     let (mut socket, response) =
         connect(Url::parse("wss://chat.destiny.gg/ws").unwrap()).expect("Can't connect");
