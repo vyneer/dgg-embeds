@@ -1,21 +1,40 @@
-# 1: Build the exe
-FROM rust:1.50 as builder
-WORKDIR /usr/src
+FROM rust as planner
+WORKDIR /app
+# We only pay the installation cost once, 
+# it will be cached from the second build onwards
+# To ensure a reproducible build consider pinning 
+# the cargo-chef version with `--version X.X.X`
+RUN cargo install cargo-chef 
+COPY . .
+RUN cargo chef prepare  --recipe-path recipe.json
 
-# 1a: Prepare for static linking
+FROM rust as cacher
+WORKDIR /app
+RUN cargo install cargo-chef
+COPY --from=planner /app/recipe.json recipe.json
+
 RUN apt-get update && \
     apt-get dist-upgrade -y && \
-    apt-get install -y musl-tools pkg-config libssl-dev && \
+    apt-get install -y musl-tools && \
     rustup target add x86_64-unknown-linux-musl
 
-# 1b: Download and compile Rust dependencies (and store as a separate Docker layer)
-RUN USER=root cargo new dgg-embeds
-WORKDIR /usr/src/dgg-embeds
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-RUN cargo install --target x86_64-unknown-linux-musl --path .
+RUN cargo chef cook --target x86_64-unknown-linux-musl --release --recipe-path recipe.json
 
-# 2: Copy the exe and extra files ("static") to an empty Docker image
+FROM rust as builder
+WORKDIR /app
+COPY . .
+# Copy over the cached dependencies
+COPY --from=cacher /app/target target
+COPY --from=cacher /usr/local/cargo /usr/local/cargo
+
+RUN apt-get update && \
+    apt-get dist-upgrade -y && \
+    apt-get install -y musl-tools && \
+    rustup target add x86_64-unknown-linux-musl
+
+RUN cargo build --target x86_64-unknown-linux-musl --release --bin dgg-embeds
+
 FROM alpine
-COPY --from=builder /usr/local/cargo/bin/dgg-embeds .
+WORKDIR /app
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/dgg-embeds .
 CMD ["./dgg-embeds"]
