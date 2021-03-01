@@ -12,13 +12,10 @@ RUN apt-get update && \
 RUN USER=root cargo new dgg-embeds
 WORKDIR /usr/src/dgg-embeds
 COPY Cargo.toml Cargo.lock ./
-RUN cargo build --release
-
-# 1c: Build the exe using the actual source code
 COPY src ./src
 RUN cargo install --target x86_64-unknown-linux-musl --path .
 
 # 2: Copy the exe and extra files ("static") to an empty Docker image
-FROM scratch
+FROM alpine
 COPY --from=builder /usr/local/cargo/bin/dgg-embeds .
-CMD ["./dgg-embeds"]
+CMD ["./dgg-embeds", "-v"]
