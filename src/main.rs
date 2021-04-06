@@ -68,7 +68,6 @@ fn main() -> Result<()> {
     }
 
     loop {
-        socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap();
         let msg_og = socket.read_message().unwrap();
         if msg_og.is_text() {
             let (msg_type, msg_data) = split_once(msg_og.to_text().unwrap());
@@ -87,8 +86,9 @@ fn main() -> Result<()> {
                             debug!("Added embed to db: {}", result);
                         }
                     }
+                    socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap();
                 },
-                _ => (),
+                _ => (socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap()),
             }
         }
     }
