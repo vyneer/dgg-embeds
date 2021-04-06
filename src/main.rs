@@ -68,7 +68,8 @@ fn main() -> Result<()> {
     }
 
     loop {
-        let msg_og = socket.read_message().expect("Error reading message");
+        socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap();
+        let msg_og = socket.read_message().unwrap();
         if msg_og.is_text() {
             let (msg_type, msg_data) = split_once(msg_og.to_text().unwrap());
             match msg_type {
