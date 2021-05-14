@@ -1,5 +1,5 @@
 use rusqlite::NO_PARAMS;
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, params};
 use std::fs;
 use tungstenite::connect;
 use serde::Deserialize;
@@ -23,7 +23,7 @@ fn split_once(in_string: &str) -> (&str, &str) {
     (first, second)
 }
 
-fn main() -> Result<()> {
+fn main() {
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml)
         .version(crate_version!())
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
         Err(_) => panic!("weow")
     }
 
-    let conn = Connection::open("./data/embeddb.db")?;
+    let conn = Connection::open("./data/embeddb.db").unwrap();
 
     conn.execute(
         "create table if not exists embeds (
@@ -53,53 +53,60 @@ fn main() -> Result<()> {
              link text
          )",
         NO_PARAMS,
-    )?;
+    ).unwrap();
 
     let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube|#youtube-live)/(?:[A-z0-9_\-]{3,64}))\b").unwrap();
 
-    let (mut socket, response) = match connect(Url::parse("wss://chat.destiny.gg/ws").unwrap()) {
-        Ok((socket, response)) => {
-            if response.status() != 101 {
-                panic!("Response isn't 101, can't continue.")
-            }
-            (socket, response)
-        },
-        Err(e) => {
-            panic!("Unexpected error: {}", e)
-        }
-    };
-
-    info!("Connected to the server");
-    debug!("Response HTTP code: {}", response.status());
-
-    if split_once(socket.read_message().unwrap().to_text().unwrap()).0 != "NAMES" {
-        panic!("Couldn't recieve the first message.")
-    }
-
     loop {
-        if socket.can_write() {
-            let msg_og = socket.read_message().unwrap();
-            if msg_og.is_text() {
-                let (msg_type, msg_data) = split_once(msg_og.to_text().unwrap());
-                match msg_type {
-                    "MSG" => {
-                        let msg_des: Message = serde_json::from_str(&msg_data).unwrap();
-                        let capt = regex.captures_iter(msg_des.data.as_str());
-                        let mut capt_vector = Vec::new();
-                        for result in capt {
-                            capt_vector.push(result[2].to_string());
-                        }
-                        if capt_vector.len() != 0 {
-                            capt_vector.dedup();
-                            for result in capt_vector {
-                                conn.execute("INSERT INTO embeds (timest, link) VALUES (?1, ?2)", params![msg_des.timestamp/1000, result])?;
-                                debug!("Added embed to db: {}", result);
-                            }
-                        }
-                        socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap();
-                    },
-                    _ => (socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap()),
+        let (mut socket, response) = match connect(Url::parse("wss://chat.destiny.gg/ws").unwrap()) {
+            Ok((socket, response)) => {
+                if response.status() != 101 {
+                    panic!("Response isn't 101, can't continue.")
                 }
+                (socket, response)
+            },
+            Err(e) => {
+                panic!("Unexpected error: {}", e)
+            }
+        };
+    
+        info!("Connected to the server");
+        debug!("Response HTTP code: {}", response.status());
+    
+        if split_once(socket.read_message().unwrap().to_text().unwrap()).0 != "NAMES" {
+            panic!("Couldn't recieve the first message.")
+        }
+    
+        loop {
+            if socket.can_write() {
+                let msg_og = socket.read_message().unwrap();
+                if msg_og.is_text() {
+                    let (msg_type, msg_data) = split_once(msg_og.to_text().unwrap());
+                    match msg_type {
+                        "MSG" => {
+                            let msg_des: Message = serde_json::from_str(&msg_data).unwrap();
+                            let capt = regex.captures_iter(msg_des.data.as_str());
+                            let mut capt_vector = Vec::new();
+                            for result in capt {
+                                capt_vector.push(result[2].to_string());
+                            }
+                            if capt_vector.len() != 0 {
+                                capt_vector.dedup();
+                                for result in capt_vector {
+                                    conn.execute("INSERT INTO embeds (timest, link) VALUES (?1, ?2)", params![msg_des.timestamp/1000, result]).unwrap();
+                                    debug!("Added embed to db: {}", result);
+                                }
+                            }
+                            socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap();
+                        },
+                        _ => (socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap()),
+                    }
+                }
+                if msg_og.is_close() {
+                    break;
+                }
+            } else {
+                break;
             }
         }
     }
