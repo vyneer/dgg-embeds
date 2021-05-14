@@ -92,7 +92,10 @@ fn main() {
                             }
                             if capt_vector.len() != 0 {
                                 capt_vector.dedup();
-                                for result in capt_vector {
+                                for mut result in capt_vector {
+                                    if result.contains("#twitch/") {
+                                        result = result.to_lowercase();
+                                    }
                                     conn.execute("INSERT INTO embeds (timest, link) VALUES (?1, ?2)", params![msg_des.timestamp/1000, result]).unwrap();
                                     debug!("Added embed to db: {}", result);
                                 }
