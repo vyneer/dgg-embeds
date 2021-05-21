@@ -4,7 +4,7 @@ use std::fs;
 use tungstenite::connect;
 use serde::Deserialize;
 use url::Url;
-use log::{info, debug};
+use log::{info, debug, error};
 use clap::{load_yaml, crate_authors, crate_description, crate_version, App};
 use std::env;
 use env_logger::Env;
@@ -79,7 +79,17 @@ fn main() {
     
         loop {
             if socket.can_write() {
-                let msg_og = socket.read_message().unwrap();
+                let msg = socket.read_message();
+                let msg_og = match msg {
+                    Ok(msg_og) => msg_og,
+                    Err(tungstenite::Error::Io(e)) => {
+                        error!("Tungstenite IO error, reconnecting: {}", e);
+                        continue;
+                    },
+                    Err(e) => {
+                        panic!("Some kind of other error occured, panicking: {}", e);
+                    }
+                };
                 if msg_og.is_text() {
                     let (msg_type, msg_data) = split_once(msg_og.to_text().unwrap());
                     match msg_type {
