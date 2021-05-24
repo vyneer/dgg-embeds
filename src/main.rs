@@ -1,14 +1,17 @@
 use rusqlite::NO_PARAMS;
 use rusqlite::{Connection, params};
 use std::fs;
-use tungstenite::connect;
+use tokio_tungstenite::{connect_async, tungstenite::Message::Ping};
 use serde::Deserialize;
 use url::Url;
-use log::{info, debug, error};
+use log::{info, debug};
 use clap::{load_yaml, crate_authors, crate_description, crate_version, App};
 use std::env;
 use env_logger::Env;
 use regex::Regex;
+use futures_util::{future, pin_mut, StreamExt};
+use tokio::time::timeout;
+use std::time::Duration;
 
 #[derive(Deserialize)]
 struct Message {
@@ -23,7 +26,8 @@ fn split_once(in_string: &str) -> (&str, &str) {
     (first, second)
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml)
         .version(crate_version!())
@@ -57,71 +61,76 @@ fn main() {
 
     let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube|#youtube-live)/(?:[A-z0-9_\-]{3,64}))\b").unwrap();
 
-    loop {
-        let (mut socket, response) = match connect(Url::parse("wss://chat.destiny.gg/ws").unwrap()) {
-            Ok((socket, response)) => {
-                if response.status() != 101 {
-                    panic!("Response isn't 101, can't continue.")
-                }
-                (socket, response)
-            },
-            Err(e) => {
-                panic!("Unexpected error: {}", e)
-            }
-        };
-    
-        info!("Connected to the server");
-        debug!("Response HTTP code: {}", response.status());
-    
-        if split_once(socket.read_message().unwrap().to_text().unwrap()).0 != "NAMES" {
-            panic!("Couldn't recieve the first message.")
-        }
-    
-        loop {
-            if socket.can_read() {
-                let msg = socket.read_message();
-                let msg_og = match msg {
-                    Ok(msg_og) => msg_og,
-                    Err(tungstenite::Error::Io(e)) => {
-                        error!("Tungstenite IO error, reconnecting: {}", e);
-                        break;
-                    },
-                    Err(e) => {
-                        panic!("Some kind of other error occured, panicking: {}", e);
+    let ws = connect_async(Url::parse("wss://chat.destiny.gg/ws").unwrap());
+
+    let (socket, response) = match timeout(Duration::from_secs(10), ws).await {
+        Ok(ws) => {
+            let (socket, response) = match ws {
+                Ok((socket, response)) => {
+                    if response.status() != 101 {
+                        panic!("Response isn't 101, can't continue.")
                     }
-                };
-                println!("{:#?}", msg_og);
-                if msg_og.is_text() {
-                    let (msg_type, msg_data) = split_once(msg_og.to_text().unwrap());
-                    match msg_type {
-                        "MSG" => {
-                            let msg_des: Message = serde_json::from_str(&msg_data).unwrap();
-                            let capt = regex.captures_iter(msg_des.data.as_str());
-                            let mut capt_vector = Vec::new();
-                            for result in capt {
-                                capt_vector.push(result[2].to_string());
-                            }
-                            if capt_vector.len() != 0 {
-                                capt_vector.dedup();
-                                for mut result in capt_vector {
-                                    if result.contains("#twitch/") {
-                                        result = result.to_lowercase();
-                                    }
-                                    conn.execute("INSERT INTO embeds (timest, link) VALUES (?1, ?2)", params![msg_des.timestamp/1000, result]).unwrap();
-                                    debug!("Added embed to db: {}", result);
+                    (socket, response)
+                },
+                Err(e) => {
+                    panic!("Unexpected error: {}", e)
+                }
+            };
+            (socket, response)
+        },
+        Err(_) => panic!("Connection timed out, panicking.")
+    };
+    
+    info!("Connected to the server");
+    debug!("Response HTTP code: {}", response.status());
+
+    let (stdin_tx, stdin_rx) = futures_channel::mpsc::unbounded();
+
+    let (write, read) = socket.split();
+
+    let stdin_to_ws = stdin_rx.map(Ok).forward(write);
+    let ws_to_stdout  = {
+        read.for_each(|msg| async {
+            let msg_og = match msg {
+                Ok(msg_og) => msg_og,
+                Err(tokio_tungstenite::tungstenite::Error::Io(e)) => {
+                    panic!("Tungstenite IO error, panicking: {}", e);
+                },
+                Err(e) => {
+                    panic!("Some kind of other error occured, panicking: {}", e);
+                }
+            };
+            if msg_og.is_text() {
+                let (msg_type, msg_data) = split_once(msg_og.to_text().unwrap());
+                match msg_type {
+                    "MSG" => {
+                        let msg_des: Message = serde_json::from_str(&msg_data).unwrap();
+                        let capt = regex.captures_iter(msg_des.data.as_str());
+                        let mut capt_vector = Vec::new();
+                        for result in capt {
+                            capt_vector.push(result[2].to_string());
+                        }
+                        if capt_vector.len() != 0 {
+                            capt_vector.dedup();
+                            for mut result in capt_vector {
+                                if result.contains("#twitch/") {
+                                    result = result.to_lowercase();
                                 }
+                                conn.execute("INSERT INTO embeds (timest, link) VALUES (?1, ?2)", params![msg_des.timestamp/1000, result]).unwrap();
+                                debug!("Added embed to db: {}", result);
                             }
-                            socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap();
-                        },
-                        _ => (socket.write_message(tungstenite::Message::Ping("ping".as_bytes().to_vec())).unwrap()),
-                    }
+                        }
+                        stdin_tx.unbounded_send(Ping("ping".as_bytes().to_vec())).unwrap();
+                    },
+                    _ => (stdin_tx.unbounded_send(Ping("ping".as_bytes().to_vec())).unwrap()),
                 }
-                if msg_og.is_close() {
-                    break;
-                }
-            } else {
-                break;
             }
-        }
-    }
+            if msg_og.is_close() {
+                panic!("Server closed the connection, panicking.")
+            }
+        })
+    };
+
+    pin_mut!(stdin_to_ws, ws_to_stdout);
+    future::select(stdin_to_ws, ws_to_stdout).await;
 }
