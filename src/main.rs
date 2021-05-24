@@ -78,18 +78,19 @@ fn main() {
         }
     
         loop {
-            if socket.can_write() {
+            if socket.can_read() {
                 let msg = socket.read_message();
                 let msg_og = match msg {
                     Ok(msg_og) => msg_og,
                     Err(tungstenite::Error::Io(e)) => {
                         error!("Tungstenite IO error, reconnecting: {}", e);
-                        continue;
+                        break;
                     },
                     Err(e) => {
                         panic!("Some kind of other error occured, panicking: {}", e);
                     }
                 };
+                println!("{:#?}", msg_og);
                 if msg_og.is_text() {
                     let (msg_type, msg_data) = split_once(msg_og.to_text().unwrap());
                     match msg_type {
