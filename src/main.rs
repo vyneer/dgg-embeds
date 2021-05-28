@@ -1,7 +1,7 @@
 use rusqlite::NO_PARAMS;
 use rusqlite::{Connection, params};
 use std::fs;
-use tokio_tungstenite::{connect_async, tungstenite::Message::Ping};
+use tokio_tungstenite::{connect_async, tungstenite::Message::Pong};
 use serde::Deserialize;
 use url::Url;
 use log::{info, debug};
@@ -120,16 +120,25 @@ async fn main() {
                                 debug!("Added embed to db: {}", result);
                             }
                         }
-                        stdin_tx.unbounded_send(Ping("ping".as_bytes().to_vec())).unwrap();
                     },
-                    _ => (stdin_tx.unbounded_send(Ping("ping".as_bytes().to_vec())).unwrap()),
+                    _ => (),
                 }
+            }
+            if msg_og.is_ping() {
+                debug!("{:?}", Pong(msg_og.clone().into_data()));
+                stdin_tx.unbounded_send(Pong(msg_og.clone().into_data())).unwrap();
             }
             if msg_og.is_close() {
                 panic!("Server closed the connection, panicking.")
             }
         })
     };
+
+    /*thread::spawn(move || {
+        stdin_tx.unbounded_send(Ping("ping".as_bytes().to_vec())).unwrap();
+
+        thread::sleep(Duration::from_secs(5));
+    }); */
 
     pin_mut!(stdin_to_ws, ws_to_stdout);
     future::select(stdin_to_ws, ws_to_stdout).await;
