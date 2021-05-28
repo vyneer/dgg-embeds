@@ -1,7 +1,7 @@
 use rusqlite::NO_PARAMS;
 use rusqlite::{Connection, params};
 use std::{fs, thread, panic, process, env};
-use tokio_tungstenite::{connect_async, tungstenite::Message::Pong, tungstenite::Message::Ping};
+use tokio_tungstenite::{connect_async, tungstenite::Message::Pong};
 use serde::Deserialize;
 use url::Url;
 use log::{info, debug};
@@ -139,7 +139,7 @@ async fn main() {
                                 }
                             }
                         },
-                        _ => (stdin_tx.unbounded_send(Ping(msg_og.clone().into_data())).unwrap()),
+                        _ => (),
                     }
                 }
                 if msg_og.is_ping() {
