@@ -101,50 +101,7 @@ async fn main() {
                     Err(_) => panic!("Lost connection, restarting.")
                 }
             }
-            /*
-            match timer_rx.recv_timeout(Duration::from_secs(60*2)) {
-                Ok(_) => (),
-                Err(_) => {
-                    panic!("Timeout, panicking.");
-                }
-            }
-            */
         });
-
-        /*
-
-        let mut last_timestamp = Arc::new(Mutex::new(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()));
-
-        thread::spawn(move || {
-            let last_timestamp = last_timestamp.clone();
-            let last_timestamp = *last_timestamp.lock().unwrap();
-            for time in timer_rx.iter() {
-                if time != last_timestamp {
-                    last_timestamp = time;
-                    println!("{}", last_timestamp);
-                }
-            }
-            /*
-            match timer_rx.recv_timeout(Duration::from_secs(60*2)) {
-                Ok(_) => (),
-                Err(_) => {
-                    panic!("Timeout, panicking.");
-                }
-            }
-            */
-        });
-
-        thread::spawn(move || {
-            loop {
-                let last_timestamp = last_timestamp.clone();
-                let last_timestamp = *last_timestamp.lock().unwrap(); 
-                if last_timestamp + 60*2 < SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() {
-                    panic!("meme");
-                }
-            }
-        });
-
-        */
     
         let (write, read) = socket.split();
     
@@ -194,12 +151,6 @@ async fn main() {
                 }
             })
         };
-    
-        /*thread::spawn(move || {
-            stdin_tx.unbounded_send(Ping("ping".as_bytes().to_vec())).unwrap();
-    
-            thread::sleep(Duration::from_secs(5));
-        }); */
     
         pin_mut!(stdin_to_ws, ws_to_stdout);
         future::select(stdin_to_ws, ws_to_stdout).await;
