@@ -1,12 +1,11 @@
 use rusqlite::NO_PARAMS;
 use rusqlite::{Connection, params};
-use std::fs;
-use tokio_tungstenite::{connect_async, tungstenite::Message::Pong};
+use std::{fs, thread, panic, process, env};
+use tokio_tungstenite::{connect_async, tungstenite::Message::Pong, tungstenite::Message::Ping};
 use serde::Deserialize;
 use url::Url;
 use log::{info, debug};
 use clap::{load_yaml, crate_authors, crate_description, crate_version, App};
-use std::env;
 use env_logger::Env;
 use regex::Regex;
 use futures_util::{future, pin_mut, StreamExt};
@@ -51,6 +50,12 @@ async fn main() {
 
     let conn = Connection::open("./data/embeddb.db").unwrap();
 
+    let orig_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        orig_hook(panic_info);
+        process::exit(1);
+    }));
+
     conn.execute(
         "create table if not exists embeds (
              timest integer,
@@ -86,12 +91,66 @@ async fn main() {
         debug!("Response HTTP code: {}", response.status());
     
         let (stdin_tx, stdin_rx) = futures_channel::mpsc::unbounded();
+
+        let (timer_tx, timer_rx) = std::sync::mpsc::channel();
+
+        thread::spawn(move || {
+            loop {
+                match timer_rx.recv_timeout(Duration::from_secs(60)) {
+                    Ok(_) => (),
+                    Err(_) => panic!("Lost connection, restarting.")
+                }
+            }
+            /*
+            match timer_rx.recv_timeout(Duration::from_secs(60*2)) {
+                Ok(_) => (),
+                Err(_) => {
+                    panic!("Timeout, panicking.");
+                }
+            }
+            */
+        });
+
+        /*
+
+        let mut last_timestamp = Arc::new(Mutex::new(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()));
+
+        thread::spawn(move || {
+            let last_timestamp = last_timestamp.clone();
+            let last_timestamp = *last_timestamp.lock().unwrap();
+            for time in timer_rx.iter() {
+                if time != last_timestamp {
+                    last_timestamp = time;
+                    println!("{}", last_timestamp);
+                }
+            }
+            /*
+            match timer_rx.recv_timeout(Duration::from_secs(60*2)) {
+                Ok(_) => (),
+                Err(_) => {
+                    panic!("Timeout, panicking.");
+                }
+            }
+            */
+        });
+
+        thread::spawn(move || {
+            loop {
+                let last_timestamp = last_timestamp.clone();
+                let last_timestamp = *last_timestamp.lock().unwrap(); 
+                if last_timestamp + 60*2 < SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() {
+                    panic!("meme");
+                }
+            }
+        });
+
+        */
     
         let (write, read) = socket.split();
     
         let stdin_to_ws = stdin_rx.map(Ok).forward(write);
         let ws_to_stdout  = {
-            let reader = read.for_each(|msg| async {
+            read.for_each(|msg| async {
                 let msg_og = match msg {
                     Ok(msg_og) => msg_og,
                     Err(tokio_tungstenite::tungstenite::Error::Io(e)) => {
@@ -101,6 +160,7 @@ async fn main() {
                         panic!("Some kind of other error occured, panicking: {}", e);
                     }
                 };
+                timer_tx.send(0).unwrap();
                 if msg_og.is_text() {
                     let (msg_type, msg_data) = split_once(msg_og.to_text().unwrap());
                     match msg_type {
@@ -122,7 +182,7 @@ async fn main() {
                                 }
                             }
                         },
-                        _ => (),
+                        _ => (stdin_tx.unbounded_send(Ping(msg_og.clone().into_data())).unwrap()),
                     }
                 }
                 if msg_og.is_ping() {
@@ -132,8 +192,7 @@ async fn main() {
                 if msg_og.is_close() {
                     panic!("Server closed the connection, panicking.")
                 }
-            });
-            timeout(Duration::from_secs(60*2), reader)
+            })
         };
     
         /*thread::spawn(move || {
