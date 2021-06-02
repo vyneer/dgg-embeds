@@ -143,7 +143,6 @@ async fn main() {
                     }
                 }
                 if msg_og.is_ping() {
-                    debug!("{:?}", Pong(msg_og.clone().into_data()));
                     stdin_tx.unbounded_send(Pong(msg_og.clone().into_data())).unwrap();
                 }
                 if msg_og.is_close() {
