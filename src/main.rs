@@ -64,7 +64,7 @@ async fn main() {
         NO_PARAMS,
     ).unwrap();
 
-    let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube|#youtube-live)/(?:[A-z0-9_\-]{3,64}))\b").unwrap();
+    let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube|#youtube-live|(?:https://|http://|)strims\.gg/angelthump)/([A-z0-9_\-]{3,64}))\b").unwrap();
 
     loop {
         let ws = connect_async(Url::parse("wss://chat.destiny.gg/ws").unwrap());
@@ -126,7 +126,12 @@ async fn main() {
                             let capt = regex.captures_iter(msg_des.data.as_str());
                             let mut capt_vector = Vec::new();
                             for result in capt {
-                                capt_vector.push(result[2].to_string());
+                                let full_link = result[2].to_string();
+                                if full_link.contains("strims.gg/angelthump") {
+                                    capt_vector.push(format!("strims.gg/angelthump/{}", result[4].to_string()));
+                                } else {
+                                    capt_vector.push(full_link);
+                                }
                             }
                             if capt_vector.len() != 0 {
                                 capt_vector.dedup();
