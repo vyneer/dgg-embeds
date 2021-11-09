@@ -20,6 +20,10 @@ clap = { version = "2.33.3", features = ["yaml"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "*"
 futures-channel = "*"
+twitch_oauth2 = "0.6.0"
+twitch_api2 = { version = "0.6.0-rc.3", features = ["helix", "client", "reqwest_client"] }
+dotenv = "*"
+reqwest = { version = "0.11", features = ["json"] }
 
 [target.'cfg(linux)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
