@@ -14,7 +14,6 @@ RUN cargo install cargo-chef
 COPY --from=planner /app/recipe.json recipe.json
 
 RUN apt-get update && \
-    apt-get dist-upgrade -y && \
     apt-get install -y musl-tools && \
     rustup target add x86_64-unknown-linux-musl
 
@@ -28,7 +27,6 @@ COPY --from=cacher /app/target target
 COPY --from=cacher /usr/local/cargo /usr/local/cargo
 
 RUN apt-get update && \
-    apt-get dist-upgrade -y && \
     apt-get install -y musl-tools && \
     rustup target add x86_64-unknown-linux-musl
 
