@@ -1,5 +1,0 @@
-name: dgg embed tracker
-args:
-    - verbose:
-        short: v
-        help: Shows more info
