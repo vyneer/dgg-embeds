@@ -57,10 +57,19 @@ fn split_once(in_string: &str) -> (&str, &str) {
 #[tokio::main]
 async fn websocket_thread_func(
     regex: Regex,
-    mut token: AppAccessToken,
+    arctoken: Arc<Mutex<AppAccessToken>>,
     twitch_client: HelixClient<ReqwestClient>,
     timer_tx: Sender<()>,
 ) {
+    let mut token = arctoken.lock().unwrap();
+    let client_id = std::env::var("TWITCH_CLIENT_ID")
+        .ok()
+        .map(ClientId::new)
+        .expect("Please set env: TWITCH_CLIENT_ID");
+    let secret = std::env::var("TWITCH_CLIENT_SECRET")
+        .ok()
+        .map(ClientSecret::new)
+        .expect("Please set env: TWITCH_CLIENT_SECRET");
     let conn = Connection::open("./data/embeddb.db").unwrap();
 
     // twitch access token validation channels
@@ -158,7 +167,9 @@ async fn websocket_thread_func(
             match val_rx.try_recv() {
                 Ok(_) => match token.validate_token(&twitch_client).await {
                     Err(_) => {
-                        token.refresh_token(&twitch_client).await.unwrap();
+                        *token = AppAccessToken::get_app_access_token(&twitch_client, client_id.clone(), secret.clone(), vec![])
+                             .await
+                             .unwrap();
                     }
                     Ok(_) => {}
                 },
@@ -205,7 +216,7 @@ async fn websocket_thread_func(
                                             let req = get_streams::GetStreamsRequest::builder()
                                                 .user_login(vec![channel.clone().into()])
                                                 .build();
-                                            let resp = twitch_client.req_get(req, &token).await;
+                                            let resp = twitch_client.req_get(req, &*token).await;
                                             match resp {
                                                 Err(e) => {
                                                     match e {
@@ -259,7 +270,7 @@ async fn websocket_thread_func(
                                         let req = get_videos::GetVideosRequest::builder()
                                             .id(vec![channel.clone().into()])
                                             .build();
-                                        let resp = twitch_client.req_get(req, &token).await;
+                                        let resp = twitch_client.req_get(req, &*token).await;
                                         if !cache_main.lock().unwrap().contains_key(&link) {
                                             match resp {
                                                 Err(e) => {
@@ -313,7 +324,7 @@ async fn websocket_thread_func(
                                         let req = get_clips::GetClipsRequest::builder()
                                             .id(vec![channel.clone().into()])
                                             .build();
-                                        let resp = twitch_client.req_get(req, &token).await;
+                                        let resp = twitch_client.req_get(req, &*token).await;
                                         if !cache_main.lock().unwrap().contains_key(&link) {
                                             match resp {
                                                 Err(e) => {
@@ -464,9 +475,9 @@ async fn main() {
         .ok()
         .map(ClientSecret::new)
         .expect("Please set env: TWITCH_CLIENT_SECRET");
-    let token = AppAccessToken::get_app_access_token(&twitch_client, client_id, secret, vec![])
+    let token = Arc::new(Mutex::new(AppAccessToken::get_app_access_token(&twitch_client, client_id, secret, vec![])
         .await
-        .unwrap();
+        .unwrap()));
 
     env_logger::Builder::from_env(
         Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, log_level),
@@ -507,7 +518,7 @@ async fn main() {
 
     'outer: loop {
         let regex = regex.clone();
-        let token = token.clone();
+        let token = Arc::clone(&token);
         let twitch_client = twitch_client.clone();
         // timeout channels
         let (timer_tx, timer_rx): (Sender<()>, Receiver<()>) = std::sync::mpsc::channel();
