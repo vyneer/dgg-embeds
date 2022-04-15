@@ -10,6 +10,7 @@ use std::{
     convert::TryInto,
     fs, panic,
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, Sender},
         Arc, Mutex,
     },
@@ -37,12 +38,18 @@ struct YoutubeOEmbed {
     author_name: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct CacheEntry {
     timestamp: i64,
     platform: String,
     channel: String,
     title: String,
+}
+
+#[derive(Debug)]
+enum WebsocketThreadError {
+    RefreshToken
 }
 
 const OEMBED_URL: &str = "https://www.youtube.com/oembed";
@@ -57,19 +64,10 @@ fn split_once(in_string: &str) -> (&str, &str) {
 #[tokio::main]
 async fn websocket_thread_func(
     regex: Regex,
-    arctoken: Arc<Mutex<AppAccessToken>>,
+    token: AppAccessToken,
     twitch_client: HelixClient<ReqwestClient>,
-    timer_tx: Sender<()>,
+    timer_tx: Sender<Result<(), WebsocketThreadError>>
 ) {
-    let mut token = arctoken.lock().unwrap();
-    let client_id = std::env::var("TWITCH_CLIENT_ID")
-        .ok()
-        .map(ClientId::new)
-        .expect("Please set env: TWITCH_CLIENT_ID");
-    let secret = std::env::var("TWITCH_CLIENT_SECRET")
-        .ok()
-        .map(ClientSecret::new)
-        .expect("Please set env: TWITCH_CLIENT_SECRET");
     let conn = Connection::open("./data/embeddb.db").unwrap();
 
     // twitch access token validation channels
@@ -159,17 +157,16 @@ async fn websocket_thread_func(
                     );
                 }
             };
-            // send () to our timer channel,
+            // send Ok(()) to our timer channel,
             // letting that other thread know we're alive
-            timer_tx.send(()).unwrap();
+            timer_tx.send(Ok(())).unwrap();
             // if there's something in the validation channel (should be every 30 minutes)
             // check the token
             match val_rx.try_recv() {
                 Ok(_) => match token.validate_token(&twitch_client).await {
                     Err(_) => {
-                        *token = AppAccessToken::get_app_access_token(&twitch_client, client_id.clone(), secret.clone(), vec![])
-                             .await
-                             .unwrap();
+                        timer_tx.send(Err(WebsocketThreadError::RefreshToken)).unwrap();
+                        panic!("The twitch token has expired, panicking.");
                     }
                     Ok(_) => {}
                 },
@@ -216,7 +213,7 @@ async fn websocket_thread_func(
                                             let req = get_streams::GetStreamsRequest::builder()
                                                 .user_login(vec![channel.clone().into()])
                                                 .build();
-                                            let resp = twitch_client.req_get(req, &*token).await;
+                                            let resp = twitch_client.req_get(req, &token).await;
                                             match resp {
                                                 Err(e) => {
                                                     match e {
@@ -270,7 +267,7 @@ async fn websocket_thread_func(
                                         let req = get_videos::GetVideosRequest::builder()
                                             .id(vec![channel.clone().into()])
                                             .build();
-                                        let resp = twitch_client.req_get(req, &*token).await;
+                                        let resp = twitch_client.req_get(req, &token).await;
                                         if !cache_main.lock().unwrap().contains_key(&link) {
                                             match resp {
                                                 Err(e) => {
@@ -324,7 +321,7 @@ async fn websocket_thread_func(
                                         let req = get_clips::GetClipsRequest::builder()
                                             .id(vec![channel.clone().into()])
                                             .build();
-                                        let resp = twitch_client.req_get(req, &*token).await;
+                                        let resp = twitch_client.req_get(req, &token).await;
                                         if !cache_main.lock().unwrap().contains_key(&link) {
                                             match resp {
                                                 Err(e) => {
@@ -458,7 +455,6 @@ async fn websocket_thread_func(
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
-    let twitch_client: HelixClient<ReqwestClient> = HelixClient::default();
     let log_level = std::env::var("DEBUG")
         .ok()
         .map(|val| match val.as_str() {
@@ -467,6 +463,7 @@ async fn main() {
             _ => panic!("Please set the DEBUG env correctly."),
         })
         .unwrap();
+    let twitch_client: HelixClient<ReqwestClient> = HelixClient::default();
     let client_id = std::env::var("TWITCH_CLIENT_ID")
         .ok()
         .map(ClientId::new)
@@ -475,9 +472,9 @@ async fn main() {
         .ok()
         .map(ClientSecret::new)
         .expect("Please set env: TWITCH_CLIENT_SECRET");
-    let token = Arc::new(Mutex::new(AppAccessToken::get_app_access_token(&twitch_client, client_id, secret, vec![])
+    let mut token = AppAccessToken::get_app_access_token(&twitch_client, client_id, secret, vec![])
         .await
-        .unwrap()));
+        .unwrap();
 
     env_logger::Builder::from_env(
         Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, log_level),
@@ -487,7 +484,11 @@ async fn main() {
 
     // making panics look nicer
     panic::set_hook(Box::new(move |panic_info| {
-        error!(target: thread::current().name().unwrap(), "{}", panic_info);
+        if let Some(s) = panic_info.payload().downcast_ref::<WebsocketThreadError>() {
+            error!(target: thread::current().name().unwrap(), "Panicked on a custom error: {:?}", s);
+        } else {
+            error!(target: thread::current().name().unwrap(), "{}", panic_info);
+        }
     }));
 
     let path = "./data";
@@ -515,13 +516,30 @@ async fn main() {
     let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube|(?:https://|http://|)strims\.gg/angelthump)/([A-z0-9_\-]{3,64}))\b").unwrap();
 
     let mut sleep_timer = 0;
+    let refresh_bool = Arc::new(AtomicBool::new(false));
 
     'outer: loop {
         let regex = regex.clone();
-        let token = Arc::clone(&token);
+        let client_id = std::env::var("TWITCH_CLIENT_ID")
+            .ok()
+            .map(ClientId::new)
+            .expect("Please set env: TWITCH_CLIENT_ID");
+        let secret = std::env::var("TWITCH_CLIENT_SECRET")
+            .ok()
+            .map(ClientSecret::new)
+            .expect("Please set env: TWITCH_CLIENT_SECRET");
+        if refresh_bool.load(Ordering::Relaxed) {
+            sleep_timer = 0;
+            token = AppAccessToken::get_app_access_token(&twitch_client, client_id, secret, vec![])
+                .await
+                .unwrap();
+            refresh_bool.store(false, Ordering::Relaxed);
+        }
+        let refresh_bool_clone = Arc::clone(&refresh_bool);
+        let token = token.clone();
         let twitch_client = twitch_client.clone();
         // timeout channels
-        let (timer_tx, timer_rx): (Sender<()>, Receiver<()>) = std::sync::mpsc::channel();
+        let (timer_tx, timer_rx): (Sender<Result<(), WebsocketThreadError>>, Receiver<Result<(), WebsocketThreadError>>) = std::sync::mpsc::channel();
 
         match sleep_timer {
             0 => {}
@@ -542,7 +560,18 @@ async fn main() {
             .name("timeout_thread".to_string())
             .spawn(move || loop {
                 match timer_rx.recv_timeout(Duration::from_secs(60)) {
-                    Ok(_) => (),
+                    Ok(a) => {
+                        match a {
+                            Ok(_) => {},
+                            Err(e) => {
+                                match e {
+                                    WebsocketThreadError::RefreshToken => {
+                                        refresh_bool_clone.store(true, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    },
                     Err(e) => {
                         panic!("Lost connection, terminating the timeout thread: {}", e);
                     }
@@ -552,7 +581,7 @@ async fn main() {
         // the main websocket thread that does all the hard work
         let ws_thread = thread::Builder::new()
             .name("websocket_thread".to_string())
-            .spawn(move || websocket_thread_func(regex, token, twitch_client, timer_tx))
+            .spawn(move || { websocket_thread_func(regex, token, twitch_client, timer_tx) })
             .unwrap();
 
         match timeout_thread.join() {

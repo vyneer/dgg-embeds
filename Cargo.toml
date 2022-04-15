@@ -1,6 +1,6 @@
 [package]
 name = "dgg-embeds"
-version = "0.1.0"
+version = "0.1.1"
 description = "Scans dgg chat for embed links and stuffs them into an sqlite db."
 authors = ["vyneer <vyneer@protonmail.com>"]
 edition = "2018"
