@@ -24,7 +24,7 @@ use twitch_api2::helix::{
     HelixRequestGetError,
 };
 use twitch_oauth2::{AppAccessToken, ClientId, ClientSecret, TwitchToken};
-use url::Url;
+use url::{Url, ParseError};
 
 #[derive(Deserialize)]
 struct Message {
@@ -183,11 +183,43 @@ async fn websocket_thread_func(
                         // add them all to a vector
                         for result in capt {
                             let full_link = result[2].to_string();
-                            if full_link.contains("strims.gg/angelthump") {
-                                capt_vector.push(format!(
-                                    "strims.gg/angelthump/{}",
-                                    result[4].to_string()
-                                ));
+                            if full_link.contains("strims.gg") {
+                                let parsed_link_init = Url::parse(full_link.as_str());
+                                let parsed_link = match parsed_link_init {
+                                    Ok(url) => url,
+                                    Err(e) => {
+                                        match e {
+                                            ParseError::RelativeUrlWithoutBase => match Url::parse(format!("https://{}", full_link.as_str()).as_str()) {
+                                                Ok(url) => url,
+                                                Err(e2) => {
+                                                    panic!("{}", e2);
+                                                }
+                                            },
+                                            _ => {
+                                                panic!("{}", e);
+                                            }
+                                        }
+                                    }
+                                };
+                                let parsed_link_path = parsed_link.path();
+                                let parsed_link_frags: Vec<&str> = parsed_link.path_segments().unwrap().collect();
+                                match parsed_link_frags.len() {
+                                    0 => {},
+                                    _ => {
+                                        match parsed_link_frags[0] {
+                                            "profile" => {},
+                                            "login" => {},
+                                            "logout" => {},
+                                            "beand" => {},
+                                            _ => {
+                                                capt_vector.push(format!(
+                                                    "strims.gg{}",
+                                                    parsed_link_path
+                                                ));
+                                            }
+                                        }
+                                    },
+                                }
                             } else {
                                 capt_vector.push(full_link);
                             }
@@ -513,7 +545,7 @@ async fn main() {
 
     conn.close().unwrap();
 
-    let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube|(?:https://|http://|)strims\.gg/angelthump)/([A-z0-9_\-]{3,64}))\b").unwrap();
+    let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube|(?:https://|http://|)strims\.gg(?:/angelthump|/facebook|/smashcast|/twitch-vod|/twitch|/ustream|/youtube-playlist|/youtube)?)/([A-z0-9_\-]{3,64}))\b").unwrap();
 
     let mut sleep_timer = 0;
     let refresh_bool = Arc::new(AtomicBool::new(false));
