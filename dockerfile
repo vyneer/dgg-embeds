@@ -16,9 +16,6 @@ RUN cargo install cargo-chef
 COPY --from=planner /app/recipe.json recipe.json
 
 RUN rustup target add x86_64-unknown-linux-musl
-RUN mkdir .cargo
-RUN echo "[net]" >> .cargo/config
-RUN echo "git-fetch-with-cli = true" >> .cargo/config
 RUN cargo chef cook --target x86_64-unknown-linux-musl --release --recipe-path recipe.json
 
 FROM rust:alpine as builder
