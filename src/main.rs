@@ -10,7 +10,7 @@ use std::{
     convert::TryInto,
     fs, panic,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, Sender},
         Arc, Mutex,
     },
@@ -24,12 +24,15 @@ use twitch_api2::helix::{
     HelixRequestGetError,
 };
 use twitch_oauth2::{AppAccessToken, ClientId, ClientSecret, TwitchToken};
-use url::{Url, ParseError};
+use url::{ParseError, Url};
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct Message {
-    data: String,
+    nick: String,
+    features: Vec<String>,
     timestamp: i64,
+    data: String,
 }
 
 #[derive(Deserialize)]
@@ -49,7 +52,7 @@ struct CacheEntry {
 
 #[derive(Debug)]
 enum WebsocketThreadError {
-    RefreshToken
+    RefreshToken,
 }
 
 const OEMBED_URL: &str = "https://www.youtube.com/oembed";
@@ -66,26 +69,10 @@ async fn websocket_thread_func(
     regex: Regex,
     token: AppAccessToken,
     twitch_client: HelixClient<ReqwestClient>,
-    timer_tx: Sender<Result<(), WebsocketThreadError>>
+    timer_tx: Sender<Result<(), WebsocketThreadError>>,
+    val_rx: Receiver<()>,
 ) {
     let conn = Connection::open("./data/embeddb.db").unwrap();
-
-    // twitch access token validation channels
-    // creating them with the sync_channel function so whatever we send wont get buffered
-    let (val_tx, val_rx) = std::sync::mpsc::sync_channel(1);
-
-    // twitch access token validation thread
-    // every 30 minutes sends a () thru a channel
-    // signaling to validate the token
-    thread::Builder::new()
-        .name("twitch_validation_thread".to_string())
-        .spawn(move || loop {
-            thread::sleep(Duration::from_secs(60 * 10 * 3));
-            match val_tx.send(()) {
-                Ok(_) => {}
-                Err(e) => panic!("Got a send error in the validation thread, this shouldn't happen, panicking: {}", e),
-            }
-        }).unwrap();
 
     let ws = connect_async(Url::parse("wss://chat.destiny.gg/ws").unwrap());
 
@@ -165,7 +152,9 @@ async fn websocket_thread_func(
             match val_rx.try_recv() {
                 Ok(_) => match token.validate_token(&twitch_client).await {
                     Err(_) => {
-                        timer_tx.send(Err(WebsocketThreadError::RefreshToken)).unwrap();
+                        timer_tx
+                            .send(Err(WebsocketThreadError::RefreshToken))
+                            .unwrap();
                         panic!("The twitch token has expired, panicking.");
                     }
                     Ok(_) => {}
@@ -187,36 +176,33 @@ async fn websocket_thread_func(
                                 let parsed_link_init = Url::parse(full_link.as_str());
                                 let parsed_link = match parsed_link_init {
                                     Ok(url) => url,
-                                    Err(e) => {
-                                        match e {
-                                            ParseError::RelativeUrlWithoutBase => match Url::parse(format!("https://{}", full_link.as_str()).as_str()) {
-                                                Ok(url) => url,
-                                                Err(e2) => {
-                                                    panic!("{}", e2);
-                                                }
-                                            },
-                                            _ => {
-                                                panic!("{}", e);
+                                    Err(e) => match e {
+                                        ParseError::RelativeUrlWithoutBase => match Url::parse(
+                                            format!("https://{}", full_link.as_str()).as_str(),
+                                        ) {
+                                            Ok(url) => url,
+                                            Err(e2) => {
+                                                panic!("{}", e2);
                                             }
+                                        },
+                                        _ => {
+                                            panic!("{}", e);
                                         }
-                                    }
+                                    },
                                 };
                                 let parsed_link_path = parsed_link.path();
-                                let parsed_link_frags: Vec<&str> = parsed_link.path_segments().unwrap().collect();
+                                let parsed_link_frags: Vec<&str> =
+                                    parsed_link.path_segments().unwrap().collect();
                                 match parsed_link_frags.len() {
-                                    0 => {},
-                                    _ => {
-                                        match parsed_link_frags[0] {
-                                            "profile" => {},
-                                            "login" => {},
-                                            "logout" => {},
-                                            "beand" => {},
-                                            _ => {
-                                                capt_vector.push(format!(
-                                                    "strims.gg{}",
-                                                    parsed_link_path
-                                                ));
-                                            }
+                                    0 => {}
+                                    _ => match parsed_link_frags[0] {
+                                        "profile" => {}
+                                        "login" => {}
+                                        "logout" => {}
+                                        "beand" => {}
+                                        _ => {
+                                            capt_vector
+                                                .push(format!("strims.gg{}", parsed_link_path));
                                         }
                                     },
                                 }
@@ -547,10 +533,11 @@ async fn main() {
 
     let regex = Regex::new(r"(^|\s)((#twitch|#twitch-vod|#twitch-clip|#youtube|(?:https://|http://|)strims\.gg(?:/angelthump|/facebook|/smashcast|/twitch-vod|/twitch|/ustream|/youtube-playlist|/youtube)?)/([A-z0-9_\-]{3,64}))\b").unwrap();
 
-    let mut sleep_timer = 0;
+    let sleep_timer = Arc::new(AtomicU64::new(0));
     let refresh_bool = Arc::new(AtomicBool::new(false));
 
     'outer: loop {
+        let sleep_timer_inner = Arc::clone(&sleep_timer);
         let regex = regex.clone();
         let client_id = std::env::var("TWITCH_CLIENT_ID")
             .ok()
@@ -561,7 +548,7 @@ async fn main() {
             .map(ClientSecret::new)
             .expect("Please set env: TWITCH_CLIENT_SECRET");
         if refresh_bool.load(Ordering::Relaxed) {
-            sleep_timer = 0;
+            sleep_timer.store(0, Ordering::Release);
             token = AppAccessToken::get_app_access_token(&twitch_client, client_id, secret, vec![])
                 .await
                 .unwrap();
@@ -571,20 +558,39 @@ async fn main() {
         let token = token.clone();
         let twitch_client = twitch_client.clone();
         // timeout channels
-        let (timer_tx, timer_rx): (Sender<Result<(), WebsocketThreadError>>, Receiver<Result<(), WebsocketThreadError>>) = std::sync::mpsc::channel();
+        let (timer_tx, timer_rx): (
+            Sender<Result<(), WebsocketThreadError>>,
+            Receiver<Result<(), WebsocketThreadError>>,
+        ) = std::sync::mpsc::channel();
+        // twitch access token validation channels
+        // creating them with the sync_channel function so whatever we send wont get buffered
+        let (val_tx, val_rx) = std::sync::mpsc::sync_channel(1);
 
-        match sleep_timer {
+        match sleep_timer.load(Ordering::Acquire) {
             0 => {}
             1 => info!(
                 "One of the threads panicked, restarting in {} second",
-                sleep_timer
+                sleep_timer.load(Ordering::Acquire)
             ),
             _ => info!(
                 "One of the threads panicked, restarting in {} seconds",
-                sleep_timer
+                sleep_timer.load(Ordering::Acquire)
             ),
         }
-        thread::sleep(Duration::from_secs(sleep_timer));
+        thread::sleep(Duration::from_secs(sleep_timer.load(Ordering::Acquire)));
+
+        // twitch access token validation thread
+        // every 30 minutes sends a () thru a channel
+        // signaling to validate the token
+        let twitch_validation_thread = thread::Builder::new()
+            .name("twitch_validation_thread".to_string())
+            .spawn(move || loop {
+                thread::sleep(Duration::from_secs(60 * 10 * 3));
+                match val_tx.send(()) {
+                    Ok(_) => {}
+                    Err(e) => panic!("Got a send error in the validation thread, this shouldn't happen, panicking: {}", e),
+                }
+            }).unwrap();
 
         // this thread checks for the timeouts in the websocket thread
         // if there's nothing in the ws for a minute, panic
@@ -592,17 +598,17 @@ async fn main() {
             .name("timeout_thread".to_string())
             .spawn(move || loop {
                 match timer_rx.recv_timeout(Duration::from_secs(60)) {
-                    Ok(a) => {
-                        match a {
-                            Ok(_) => {},
-                            Err(e) => {
-                                match e {
-                                    WebsocketThreadError::RefreshToken => {
-                                        refresh_bool_clone.store(true, Ordering::Relaxed);
-                                    }
-                                }
+                    Ok(a) => match a {
+                        Ok(_) => {
+                            if sleep_timer_inner.load(Ordering::Acquire) != 0 {
+                                sleep_timer_inner.store(0, Ordering::Release)
                             }
                         }
+                        Err(e) => match e {
+                            WebsocketThreadError::RefreshToken => {
+                                refresh_bool_clone.store(true, Ordering::Relaxed);
+                            }
+                        },
                     },
                     Err(e) => {
                         panic!("Lost connection, terminating the timeout thread: {}", e);
@@ -610,18 +616,32 @@ async fn main() {
                 }
             })
             .unwrap();
+
         // the main websocket thread that does all the hard work
         let ws_thread = thread::Builder::new()
             .name("websocket_thread".to_string())
-            .spawn(move || { websocket_thread_func(regex, token, twitch_client, timer_tx) })
+            .spawn(move || websocket_thread_func(regex, token, twitch_client, timer_tx, val_rx))
             .unwrap();
 
         match timeout_thread.join() {
             Ok(_) => {}
             Err(_) => {
-                match sleep_timer {
-                    0 => sleep_timer = 1,
-                    1..=64 => sleep_timer = sleep_timer * 2,
+                match sleep_timer.load(Ordering::Acquire) {
+                    0 => sleep_timer.store(1, Ordering::Release),
+                    1..=16 => sleep_timer
+                        .store(sleep_timer.load(Ordering::Acquire) * 2, Ordering::Release),
+                    _ => {}
+                }
+                continue 'outer;
+            }
+        }
+        match twitch_validation_thread.join() {
+            Ok(_) => {}
+            Err(_) => {
+                match sleep_timer.load(Ordering::Acquire) {
+                    0 => sleep_timer.store(1, Ordering::Release),
+                    1..=16 => sleep_timer
+                        .store(sleep_timer.load(Ordering::Acquire) * 2, Ordering::Release),
                     _ => {}
                 }
                 continue 'outer;
@@ -630,9 +650,10 @@ async fn main() {
         match ws_thread.join() {
             Ok(_) => {}
             Err(_) => {
-                match sleep_timer {
-                    0 => sleep_timer = 1,
-                    1..=64 => sleep_timer = sleep_timer * 2,
+                match sleep_timer.load(Ordering::Acquire) {
+                    0 => sleep_timer.store(1, Ordering::Release),
+                    1..=16 => sleep_timer
+                        .store(sleep_timer.load(Ordering::Acquire) * 2, Ordering::Release),
                     _ => {}
                 }
                 continue 'outer;
