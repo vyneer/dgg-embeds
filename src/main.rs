@@ -1,3 +1,4 @@
+use crossbeam_channel::{Receiver, Sender};
 use env_logger::Env;
 use futures_util::{future, pin_mut, StreamExt};
 use log::{debug, error, info};
@@ -11,7 +12,6 @@ use std::{
     fs, panic,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{Receiver, Sender},
         Arc, Mutex,
     },
     thread,
@@ -55,6 +55,11 @@ enum WebsocketThreadError {
     RefreshToken,
 }
 
+enum TimeoutMsg {
+    Ok,
+    Shutdown,
+}
+
 const OEMBED_URL: &str = "https://www.youtube.com/oembed";
 
 fn split_once(in_string: &str) -> (&str, &str) {
@@ -69,8 +74,11 @@ async fn websocket_thread_func(
     regex: Regex,
     token: AppAccessToken,
     twitch_client: HelixClient<ReqwestClient>,
-    timer_tx: Sender<Result<(), WebsocketThreadError>>,
-    val_rx: Receiver<()>,
+    timer_tx: Sender<Result<TimeoutMsg, WebsocketThreadError>>,
+    val_rx: Receiver<u64>,
+    ctrlc_inner_rx: Receiver<()>,
+    ctrlc_outer_tx: Sender<()>,
+    ctrlc_validation_tx: Sender<()>,
 ) {
     let conn = Connection::open("./data/embeddb.db").unwrap();
 
@@ -122,6 +130,11 @@ async fn websocket_thread_func(
         });
     });
 
+    let mut val_time: u64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
     let (write, mut read) = socket.split();
 
     // futures/websocket shenanigans
@@ -146,19 +159,34 @@ async fn websocket_thread_func(
             };
             // send Ok(()) to our timer channel,
             // letting that other thread know we're alive
-            timer_tx.send(Ok(())).unwrap();
+            timer_tx.send(Ok(TimeoutMsg::Ok)).unwrap();
+            // try and receive ctrl-c signal to shutdown
+            match ctrlc_inner_rx.try_recv() {
+                Ok(_) => {
+                    ctrlc_outer_tx.send(()).unwrap();
+                    ctrlc_validation_tx.send(()).unwrap();
+                    timer_tx.send(Ok(TimeoutMsg::Shutdown)).unwrap();
+                    break;
+                }
+                Err(_) => {}
+            }
             // if there's something in the validation channel (should be every 30 minutes)
             // check the token
             match val_rx.try_recv() {
-                Ok(_) => match token.validate_token(&twitch_client).await {
-                    Err(_) => {
-                        timer_tx
-                            .send(Err(WebsocketThreadError::RefreshToken))
-                            .unwrap();
-                        panic!("The twitch token has expired, panicking.");
+                Ok(n) => {
+                    if (n > val_time) && (n - val_time) > (60 * 10 * 3) {
+                        val_time = n;
+                        match token.validate_token(&twitch_client).await {
+                            Err(_) => {
+                                timer_tx
+                                    .send(Err(WebsocketThreadError::RefreshToken))
+                                    .unwrap();
+                                panic!("The twitch token has expired, panicking.");
+                            }
+                            Ok(_) => {}
+                        }
                     }
-                    Ok(_) => {}
-                },
+                }
                 Err(_) => (),
             }
             if msg_og.is_text() {
@@ -535,8 +563,28 @@ async fn main() {
 
     let sleep_timer = Arc::new(AtomicU64::new(0));
     let refresh_bool = Arc::new(AtomicBool::new(false));
+    let (ctrlc_outer_tx, ctrlc_outer_rx): (Sender<()>, Receiver<()>) =
+        crossbeam_channel::unbounded();
 
     'outer: loop {
+        let (ctrlc_validation_tx, ctrlc_validation_rx): (Sender<()>, Receiver<()>) =
+            crossbeam_channel::unbounded();
+        let cloned_ctrlc_outer_tx_ws = ctrlc_outer_tx.clone();
+
+        match ctrlc_outer_rx.try_recv() {
+            Ok(_) => {
+                break 'outer;
+            }
+            Err(_) => {}
+        }
+
+        match ctrlc_validation_rx.try_recv() {
+            Ok(_) => {
+                break 'outer;
+            }
+            Err(_) => {}
+        }
+
         let sleep_timer_inner = Arc::clone(&sleep_timer);
         let regex = regex.clone();
         let client_id = std::env::var("TWITCH_CLIENT_ID")
@@ -559,12 +607,14 @@ async fn main() {
         let twitch_client = twitch_client.clone();
         // timeout channels
         let (timer_tx, timer_rx): (
-            Sender<Result<(), WebsocketThreadError>>,
-            Receiver<Result<(), WebsocketThreadError>>,
-        ) = std::sync::mpsc::channel();
+            Sender<Result<TimeoutMsg, WebsocketThreadError>>,
+            Receiver<Result<TimeoutMsg, WebsocketThreadError>>,
+        ) = crossbeam_channel::unbounded();
         // twitch access token validation channels
         // creating them with the sync_channel function so whatever we send wont get buffered
-        let (val_tx, val_rx) = std::sync::mpsc::sync_channel(1);
+        let (val_tx, val_rx): (Sender<u64>, Receiver<u64>) = crossbeam_channel::bounded(1);
+        let (ctrlc_inner_tx, ctrlc_inner_rx): (Sender<()>, Receiver<()>) =
+            crossbeam_channel::unbounded();
 
         match sleep_timer.load(Ordering::Acquire) {
             0 => {}
@@ -585,11 +635,18 @@ async fn main() {
         let twitch_validation_thread = thread::Builder::new()
             .name("twitch_validation_thread".to_string())
             .spawn(move || loop {
-                thread::sleep(Duration::from_secs(60 * 10 * 3));
-                match val_tx.send(()) {
-                    Ok(_) => {}
-                    Err(e) => panic!("Got a send error in the validation thread, this shouldn't happen, panicking: {}", e),
+                match ctrlc_validation_rx.try_recv() {
+                    Ok(_) => {
+                        break;
+                    },
+                    Err(_) => {
+                        match val_tx.send(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()) {
+                            Ok(_) => {}
+                            Err(e) => panic!("Got a send error in the validation thread, this shouldn't happen, panicking: {}", e),
+                        }
+                    }
                 }
+                thread::sleep(Duration::from_secs(5));
             }).unwrap();
 
         // this thread checks for the timeouts in the websocket thread
@@ -599,11 +656,16 @@ async fn main() {
             .spawn(move || loop {
                 match timer_rx.recv_timeout(Duration::from_secs(60)) {
                     Ok(a) => match a {
-                        Ok(_) => {
-                            if sleep_timer_inner.load(Ordering::Acquire) != 0 {
-                                sleep_timer_inner.store(0, Ordering::Release)
+                        Ok(m) => match m {
+                            TimeoutMsg::Ok => {
+                                if sleep_timer_inner.load(Ordering::Acquire) != 0 {
+                                    sleep_timer_inner.store(0, Ordering::Release)
+                                }
                             }
-                        }
+                            TimeoutMsg::Shutdown => {
+                                break;
+                            }
+                        },
                         Err(e) => match e {
                             WebsocketThreadError::RefreshToken => {
                                 refresh_bool_clone.store(true, Ordering::Relaxed);
@@ -620,8 +682,24 @@ async fn main() {
         // the main websocket thread that does all the hard work
         let ws_thread = thread::Builder::new()
             .name("websocket_thread".to_string())
-            .spawn(move || websocket_thread_func(regex, token, twitch_client, timer_tx, val_rx))
+            .spawn(move || {
+                websocket_thread_func(
+                    regex,
+                    token,
+                    twitch_client,
+                    timer_tx,
+                    val_rx,
+                    ctrlc_inner_rx,
+                    cloned_ctrlc_outer_tx_ws,
+                    ctrlc_validation_tx,
+                )
+            })
             .unwrap();
+
+        ctrlc::set_handler(move || {
+            ctrlc_inner_tx.send(()).unwrap();
+        })
+        .expect("Error setting Ctrl-C handler");
 
         match timeout_thread.join() {
             Ok(_) => {}
